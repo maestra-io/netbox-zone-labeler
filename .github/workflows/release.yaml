@@ -11,6 +11,9 @@ permissions:
 env:
   AWS_REGION: eu-central-1
   ECR_REGISTRY: 515260921971.dkr.ecr.eu-central-1.amazonaws.com
+  TELEPORT_FQDN: teleport.maestra.io:443
+  TELEPORT_TOKEN: image-pull-github-actions-netbox-zone-labeler
+  AWS_ROLE_ARN: "arn:aws:iam::515260921971:role/teleport-image-pull"
 
 jobs:
   release:
@@ -18,20 +21,64 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+      - uses: azure/setup-helm@v4
 
-      - uses: aws-actions/amazon-ecr-login@v2
-        id: ecr
-
-      - name: Ensure ECR repositories exist
+      - name: Get Teleport version
+        id: tp-version
         run: |
+          VERSION=$(curl -sf "https://${{ env.TELEPORT_FQDN }}/webapi/find" | jq -r '.auto_update.tools_version // .server_version')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v5
+        with:
+          path: ${{ runner.tool_cache }}/teleport
+          key: teleport-${{ steps.tp-version.outputs.version }}-${{ runner.os }}-${{ runner.arch }}
+
+      - uses: teleport-actions/setup@v1
+        with:
+          version: ${{ steps.tp-version.outputs.version }}
+          proxy: ${{ env.TELEPORT_FQDN }}
+
+      - name: ECR login via Teleport Workload Identity
+        run: |
+          cat > /tmp/tbot.yaml << EOF
+          version: v2
+          proxy_server: ${{ env.TELEPORT_FQDN }}
+          onboarding:
+            join_method: github
+            token: ${{ env.TELEPORT_TOKEN }}
+          oneshot: true
+          storage:
+            type: memory
+          services:
+            - type: workload-identity-jwt
+              destination:
+                type: directory
+                path: /tmp/tbot-output
+              selector:
+                name: image-pull
+              audiences: ["sts.amazonaws.com"]
+          EOF
+
+          mkdir -p /tmp/tbot-output
+          tbot start -c /tmp/tbot.yaml || true
+          test -f /tmp/tbot-output/jwt_svid
+
+          pip install -q awscli
+          export AWS_WEB_IDENTITY_TOKEN_FILE=/tmp/tbot-output/jwt_svid
+          export AWS_ROLE_ARN="${{ env.AWS_ROLE_ARN }}"
+          export AWS_DEFAULT_REGION=${{ env.AWS_REGION }}
+
+          # Ensure ECR repositories exist
           for REPO in netbox-zone-labeler helm-charts/netbox-zone-labeler; do
             aws ecr describe-repositories --repository-names "$REPO" 2>/dev/null || \
               aws ecr create-repository --repository-name "$REPO"
           done
+
+          # Login Docker + Helm to ECR
+          PASSWORD=$(aws ecr get-login-password --region ${{ env.AWS_REGION }})
+          echo "$PASSWORD" | docker login ${{ env.ECR_REGISTRY }} --username AWS --password-stdin
+          echo "$PASSWORD" | helm registry login ${{ env.ECR_REGISTRY }} --username AWS --password-stdin
 
       - uses: docker/metadata-action@v5
         id: meta
