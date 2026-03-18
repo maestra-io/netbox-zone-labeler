@@ -1,5 +1,5 @@
 image:
-  repository: ghcr.io/maestra-io/netbox-zone-labeler
+  repository: 515260921971.dkr.ecr.eu-central-1.amazonaws.com/netbox-zone-labeler
   tag: ""
   pullPolicy: IfNotPresent
 
