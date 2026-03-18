@@ -1,0 +1,40 @@
+image:
+  repository: ghcr.io/maestra-io/netbox-zone-labeler
+  tag: ""
+  pullPolicy: IfNotPresent
+
+tbot:
+  image: public.ecr.aws/gravitational/tbot-distroless:18.7.3
+  proxyServer: teleport.maestra.io:443
+  appName: netbox
+  port: 8080
+  joinToken: netbox-zone-labeler
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 64Mi
+
+netbox:
+  url: "http://localhost:8080"
+
+env: []
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    memory: 64Mi
+
+nodeSelector:
+  node-role.kubernetes.io/system: ""
+
+tolerations:
+  - key: node-role.kubernetes.io/system
+    operator: Exists
+    effect: NoSchedule
+
+serviceAccount:
+  name: netbox-zone-labeler

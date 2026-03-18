@@ -1,0 +1,91 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: netbox-zone-labeler
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: netbox-zone-labeler
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: netbox-zone-labeler
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: netbox-zone-labeler
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: tbot
+          image: {{ .Values.tbot.image }}
+          args:
+            - start
+            - -c
+            - /config/tbot.yaml
+          ports:
+            - containerPort: {{ .Values.tbot.port }}
+              name: app-tunnel
+          securityContext:
+            runAsUser: 65532
+            runAsGroup: 65532
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tbot-config
+              mountPath: /config
+              readOnly: true
+            - name: teleport-join-token
+              mountPath: /var/run/secrets/teleport-join
+              readOnly: true
+          env:
+            - name: KUBERNETES_TOKEN_PATH
+              value: /var/run/secrets/teleport-join/token
+          resources:
+            {{- toYaml .Values.tbot.resources | nindent 12 }}
+        - name: labeler
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            runAsUser: 65534
+            runAsGroup: 65534
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: NETBOX_URL
+              value: {{ .Values.netbox.url | quote }}
+            - name: NETBOX_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: netbox-zone-labeler
+                  key: token
+            {{- with .Values.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: tbot-config
+          configMap:
+            name: tbot-config
+        - name: teleport-join-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 600
+                  audience: teleport.maestra.io

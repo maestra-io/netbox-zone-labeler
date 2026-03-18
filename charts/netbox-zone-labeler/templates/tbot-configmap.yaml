@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tbot-config
+  namespace: {{ .Release.Namespace }}
+data:
+  tbot.yaml: |
+    version: v2
+    proxy_server: {{ .Values.tbot.proxyServer }}
+    onboarding:
+      join_method: kubernetes
+      token: {{ .Values.tbot.joinToken }}
+    storage:
+      type: memory
+    services:
+      - type: application-tunnel
+        app_name: {{ .Values.tbot.appName }}
+        listen: tcp://0.0.0.0:{{ .Values.tbot.port }}
