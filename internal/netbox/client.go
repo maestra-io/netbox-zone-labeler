@@ -16,8 +16,9 @@ const (
 )
 
 var (
-	errNotFound = errors.New("device not found in netbox")
-	errNoRack   = errors.New("device has no rack assigned")
+	errNotFound  = errors.New("device not found in netbox")
+	errNoRack    = errors.New("device has no rack assigned")
+	errRetryable = errors.New("retryable error")
 )
 
 // IsNotFound reports whether the error indicates a device was not found in NetBox.
@@ -28,6 +29,11 @@ func IsNotFound(err error) bool {
 // IsNoRack reports whether the error indicates a device has no rack assigned.
 func IsNoRack(err error) bool {
 	return errors.Is(err, errNoRack)
+}
+
+// IsRetryable reports whether the error is transient and worth retrying.
+func IsRetryable(err error) bool {
+	return errors.Is(err, errRetryable)
 }
 
 type Client struct {
@@ -63,8 +69,9 @@ type Rack struct {
 }
 
 // GetDeviceRack returns the rack name for a device identified by hostname.
-// It retries transient errors with exponential backoff but does not retry
-// "not found" or "no rack" errors.
+// It retries only transient errors (network errors, 5xx, 429) with exponential
+// backoff. Permanent errors (not found, no rack, 4xx, decode errors) are
+// returned immediately.
 func (c *Client) GetDeviceRack(ctx context.Context, hostname string) (string, error) {
 	var lastErr error
 	for attempt := range maxRetries + 1 {
@@ -81,7 +88,7 @@ func (c *Client) GetDeviceRack(ctx context.Context, hostname string) (string, er
 		if err == nil {
 			return rack, nil
 		}
-		if errors.Is(err, errNotFound) || errors.Is(err, errNoRack) {
+		if !errors.Is(err, errRetryable) {
 			return "", err
 		}
 		lastErr = err
@@ -107,20 +114,27 @@ func (c *Client) getDeviceRack(ctx context.Context, hostname string) (string, er
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("request netbox: %w", err)
+		// Network/transport errors are retryable
+		return "", fmt.Errorf("request netbox: %w: %w", errRetryable, err)
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests {
+		// 5xx and 429 are retryable
+		return "", fmt.Errorf("netbox returned status %d: %w", resp.StatusCode, errRetryable)
+	}
 	if resp.StatusCode != http.StatusOK {
+		// Other non-200 (401, 403, 404, etc.) are permanent
 		return "", fmt.Errorf("netbox returned status %d", resp.StatusCode)
 	}
 
 	var result deviceListResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		// Decode errors are permanent (bad response shape)
 		return "", fmt.Errorf("decode response: %w", err)
 	}
 
-	if result.Count == 0 {
+	if len(result.Results) == 0 {
 		return "", fmt.Errorf("device %q: %w", hostname, errNotFound)
 	}
 

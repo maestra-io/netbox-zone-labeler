@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -89,7 +90,7 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
-	var ready bool
+	var ready atomic.Bool
 	go serveHealth(&ready)
 
 	factory := informers.NewSharedInformerFactory(clientset, resyncInterval)
@@ -126,7 +127,7 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	ready = true
+	ready.Store(true)
 
 	slog.Info("informer synced, starting periodic reconcile loop")
 
@@ -281,14 +282,14 @@ func isValidLabel(s string) bool {
 	return labelRegexp.MatchString(s)
 }
 
-func serveHealth(ready *bool) {
+func serveHealth(ready *atomic.Bool) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprint(w, "ok")
 	})
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
-		if *ready {
+		if ready.Load() {
 			w.WriteHeader(http.StatusOK)
 			fmt.Fprint(w, "ok")
 		} else {
