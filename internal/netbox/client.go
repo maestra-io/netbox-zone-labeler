@@ -3,11 +3,32 @@ package netbox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"time"
 )
+
+const (
+	maxRetries     = 3
+	initialBackoff = 500 * time.Millisecond
+)
+
+var (
+	errNotFound = errors.New("device not found in netbox")
+	errNoRack   = errors.New("device has no rack assigned")
+)
+
+// IsNotFound reports whether the error indicates a device was not found in NetBox.
+func IsNotFound(err error) bool {
+	return errors.Is(err, errNotFound)
+}
+
+// IsNoRack reports whether the error indicates a device has no rack assigned.
+func IsNoRack(err error) bool {
+	return errors.Is(err, errNoRack)
+}
 
 type Client struct {
 	baseURL    string
@@ -42,7 +63,33 @@ type Rack struct {
 }
 
 // GetDeviceRack returns the rack name for a device identified by hostname.
+// It retries transient errors with exponential backoff but does not retry
+// "not found" or "no rack" errors.
 func (c *Client) GetDeviceRack(ctx context.Context, hostname string) (string, error) {
+	var lastErr error
+	for attempt := range maxRetries + 1 {
+		if attempt > 0 {
+			backoff := initialBackoff * time.Duration(1<<(attempt-1))
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+			case <-time.After(backoff):
+			}
+		}
+
+		rack, err := c.getDeviceRack(ctx, hostname)
+		if err == nil {
+			return rack, nil
+		}
+		if errors.Is(err, errNotFound) || errors.Is(err, errNoRack) {
+			return "", err
+		}
+		lastErr = err
+	}
+	return "", fmt.Errorf("after %d retries: %w", maxRetries, lastErr)
+}
+
+func (c *Client) getDeviceRack(ctx context.Context, hostname string) (string, error) {
 	u, err := url.Parse(c.baseURL + "/api/dcim/devices/")
 	if err != nil {
 		return "", fmt.Errorf("parse url: %w", err)
@@ -74,12 +121,12 @@ func (c *Client) GetDeviceRack(ctx context.Context, hostname string) (string, er
 	}
 
 	if result.Count == 0 {
-		return "", fmt.Errorf("device %q not found in netbox", hostname)
+		return "", fmt.Errorf("device %q: %w", hostname, errNotFound)
 	}
 
 	device := result.Results[0]
 	if device.Rack == nil {
-		return "", fmt.Errorf("device %q has no rack assigned", hostname)
+		return "", fmt.Errorf("device %q: %w", hostname, errNoRack)
 	}
 
 	return device.Rack.Name, nil
