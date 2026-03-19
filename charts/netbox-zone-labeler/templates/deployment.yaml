@@ -20,6 +20,9 @@ spec:
       imagePullSecrets:
         - name: image-pull
       serviceAccountName: {{ .Values.serviceAccount.name }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . | quote }}
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
@@ -43,8 +46,20 @@ spec:
             runAsGroup: 65532
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
+            seccompProfile:
+              type: RuntimeDefault
             capabilities:
               drop: ["ALL"]
+          livenessProbe:
+            tcpSocket:
+              port: app-tunnel
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          readinessProbe:
+            tcpSocket:
+              port: app-tunnel
+            initialDelaySeconds: 5
+            periodSeconds: 10
           volumeMounts:
             - name: tbot-config
               mountPath: /config
@@ -60,13 +75,30 @@ spec:
         - name: labeler
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: 8081
+              name: health
           securityContext:
             runAsUser: 65534
             runAsGroup: 65534
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
+            seccompProfile:
+              type: RuntimeDefault
             capabilities:
               drop: ["ALL"]
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
           env:
             - name: NETBOX_URL
               value: {{ .Values.netbox.url | quote }}
@@ -75,6 +107,10 @@ spec:
                 secretKeyRef:
                   name: netbox-zone-labeler
                   key: token
+            {{- if .Values.excludeNodeRoles }}
+            - name: EXCLUDE_NODE_ROLES
+              value: {{ .Values.excludeNodeRoles | quote }}
+            {{- end }}
             {{- with .Values.env }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

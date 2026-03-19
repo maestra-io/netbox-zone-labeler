@@ -19,6 +19,11 @@ tbot:
 netbox:
   url: "http://localhost:8080"
 
+# Comma-separated list of node roles to exclude from labeling.
+# Nodes with label node-role.kubernetes.io/<role> will be skipped.
+# Example: "master,control-plane,system"
+excludeNodeRoles: ""
+
 env: []
 
 resources:
@@ -27,6 +32,8 @@ resources:
     memory: 32Mi
   limits:
     memory: 64Mi
+
+priorityClassName: ""
 
 nodeSelector:
   node-role.kubernetes.io/system: ""
