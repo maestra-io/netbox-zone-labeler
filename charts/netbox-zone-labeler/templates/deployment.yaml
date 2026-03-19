@@ -17,6 +17,8 @@ spec:
       labels:
         app.kubernetes.io/name: netbox-zone-labeler
     spec:
+      imagePullSecrets:
+        - name: image-pull
       serviceAccountName: {{ .Values.serviceAccount.name }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
