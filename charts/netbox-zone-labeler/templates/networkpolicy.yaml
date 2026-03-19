@@ -26,7 +26,9 @@ spec:
     - ports:
         - port: 6443
           protocol: TCP
-    # Allow Teleport proxy (tbot sidecar)
+    # Allow Teleport proxy (tbot sidecar: 443 for API, 3024 for auth tunnel)
     - ports:
         - port: 443
+          protocol: TCP
+        - port: 3024
           protocol: TCP
