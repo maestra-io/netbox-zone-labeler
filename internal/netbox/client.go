@@ -42,6 +42,7 @@ type Client struct {
 	httpClient *http.Client
 }
 
+// NewClient creates a NetBox API client with the given base URL and auth token.
 func NewClient(baseURL, token string) *Client {
 	return &Client{
 		baseURL: baseURL,

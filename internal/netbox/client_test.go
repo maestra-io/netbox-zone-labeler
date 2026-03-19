@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 )
 
@@ -68,9 +69,9 @@ func TestGetDeviceRack_NoRack(t *testing.T) {
 }
 
 func TestGetDeviceRack_ServerErrorRetries(t *testing.T) {
-	attempts := 0
+	var attempts atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		attempts++
+		attempts.Add(1)
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer server.Close()
@@ -80,17 +81,16 @@ func TestGetDeviceRack_ServerErrorRetries(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	// 1 initial + 3 retries = 4 total
-	if attempts != maxRetries+1 {
-		t.Errorf("expected %d attempts (retries on 5xx), got %d", maxRetries+1, attempts)
+	if got := attempts.Load(); got != int32(maxRetries+1) {
+		t.Errorf("expected %d attempts (retries on 5xx), got %d", maxRetries+1, got)
 	}
 }
 
 func TestGetDeviceRack_RetryOnTransientThenSuccess(t *testing.T) {
-	attempts := 0
+	var attempts atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		attempts++
-		if attempts < 3 {
+		attempts.Add(1)
+		if attempts.Load() < 3 {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
@@ -107,16 +107,16 @@ func TestGetDeviceRack_RetryOnTransientThenSuccess(t *testing.T) {
 	if rack != "Rack-1" {
 		t.Errorf("expected Rack-1, got %s", rack)
 	}
-	if attempts != 3 {
-		t.Errorf("expected 3 attempts, got %d", attempts)
+	if got := attempts.Load(); got != 3 {
+		t.Errorf("expected 3 attempts, got %d", got)
 	}
 }
 
 func TestGetDeviceRack_RetryOn429(t *testing.T) {
-	attempts := 0
+	var attempts atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		attempts++
-		if attempts < 2 {
+		attempts.Add(1)
+		if attempts.Load() < 2 {
 			w.WriteHeader(http.StatusTooManyRequests)
 			return
 		}
@@ -133,15 +133,15 @@ func TestGetDeviceRack_RetryOn429(t *testing.T) {
 	if rack != "Rack-1" {
 		t.Errorf("expected Rack-1, got %s", rack)
 	}
-	if attempts != 2 {
-		t.Errorf("expected 2 attempts (retry on 429), got %d", attempts)
+	if got := attempts.Load(); got != 2 {
+		t.Errorf("expected 2 attempts (retry on 429), got %d", got)
 	}
 }
 
 func TestGetDeviceRack_NoRetryOn4xx(t *testing.T) {
-	attempts := 0
+	var attempts atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		attempts++
+		attempts.Add(1)
 		w.WriteHeader(http.StatusForbidden)
 	}))
 	defer server.Close()
@@ -151,15 +151,15 @@ func TestGetDeviceRack_NoRetryOn4xx(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	if attempts != 1 {
-		t.Errorf("expected 1 attempt (no retry for 403), got %d", attempts)
+	if got := attempts.Load(); got != 1 {
+		t.Errorf("expected 1 attempt (no retry for 403), got %d", got)
 	}
 }
 
 func TestGetDeviceRack_NoRetryOnNotFound(t *testing.T) {
-	attempts := 0
+	var attempts atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		attempts++
+		attempts.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"count":0,"results":[]}`))
 	}))
@@ -170,15 +170,15 @@ func TestGetDeviceRack_NoRetryOnNotFound(t *testing.T) {
 	if !IsNotFound(err) {
 		t.Fatalf("expected not found error, got: %v", err)
 	}
-	if attempts != 1 {
-		t.Errorf("expected 1 attempt (no retry for not found), got %d", attempts)
+	if got := attempts.Load(); got != 1 {
+		t.Errorf("expected 1 attempt (no retry for not found), got %d", got)
 	}
 }
 
 func TestGetDeviceRack_NoRetryOnNoRack(t *testing.T) {
-	attempts := 0
+	var attempts atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		attempts++
+		attempts.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"count":1,"results":[{"id":1,"name":"node-1","rack":null}]}`))
 	}))
@@ -186,15 +186,15 @@ func TestGetDeviceRack_NoRetryOnNoRack(t *testing.T) {
 
 	client := NewClient(server.URL, "test-token")
 	_, _ = client.GetDeviceRack(context.Background(), "node-1")
-	if attempts != 1 {
-		t.Errorf("expected 1 attempt (no retry for no rack), got %d", attempts)
+	if got := attempts.Load(); got != 1 {
+		t.Errorf("expected 1 attempt (no retry for no rack), got %d", got)
 	}
 }
 
 func TestGetDeviceRack_NoRetryOnInvalidJSON(t *testing.T) {
-	attempts := 0
+	var attempts atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		attempts++
+		attempts.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`not json`))
 	}))
@@ -205,7 +205,7 @@ func TestGetDeviceRack_NoRetryOnInvalidJSON(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for invalid JSON")
 	}
-	if attempts != 1 {
-		t.Errorf("expected 1 attempt (no retry for decode error), got %d", attempts)
+	if got := attempts.Load(); got != 1 {
+		t.Errorf("expected 1 attempt (no retry for decode error), got %d", got)
 	}
 }

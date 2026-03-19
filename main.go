@@ -146,6 +146,8 @@ func main() {
 	}
 }
 
+// buildKubeConfig returns a Kubernetes client config, trying in-cluster first
+// then falling back to KUBECONFIG or ~/.kube/config for local development.
 func buildKubeConfig() (*rest.Config, error) {
 	cfg, err := rest.InClusterConfig()
 	if err == nil {
@@ -160,6 +162,8 @@ func buildKubeConfig() (*rest.Config, error) {
 	return clientcmd.BuildConfigFromFlags("", kubeconfig)
 }
 
+// toNode safely extracts a *corev1.Node from an informer event object,
+// handling both direct types and cache.DeletedFinalStateUnknown wrappers.
 func toNode(obj interface{}) (*corev1.Node, bool) {
 	if node, ok := obj.(*corev1.Node); ok {
 		return node, true
@@ -172,6 +176,7 @@ func toNode(obj interface{}) (*corev1.Node, bool) {
 	return nil, false
 }
 
+// parseExcludeRoles parses a comma-separated list of node roles to exclude.
 func parseExcludeRoles(s string) map[string]struct{} {
 	roles := make(map[string]struct{})
 	if s == "" {
@@ -186,6 +191,7 @@ func parseExcludeRoles(s string) map[string]struct{} {
 	return roles
 }
 
+// isExcluded returns true if the node has any of the excluded roles.
 func isExcluded(node *corev1.Node, excludedRoles map[string]struct{}) bool {
 	for role := range excludedRoles {
 		if _, ok := node.Labels["node-role.kubernetes.io/"+role]; ok {
@@ -195,6 +201,8 @@ func isExcluded(node *corev1.Node, excludedRoles map[string]struct{}) bool {
 	return false
 }
 
+// labelNode fetches the rack for a node from NetBox and applies the zone label.
+// Nodes not found in NetBox are added to the negative cache.
 func labelNode(ctx context.Context, clientset kubernetes.Interface, nb *netbox.Client, nc *negativeCache, node *corev1.Node) {
 	hostname := node.Name
 	if nc.Has(hostname) {
@@ -249,6 +257,7 @@ func labelNode(ctx context.Context, clientset kubernetes.Interface, nb *netbox.C
 	slog.Info("labeled node", "node", hostname, "zone", rack)
 }
 
+// reconcileAll iterates all nodes and ensures each one has the correct zone label.
 func reconcileAll(ctx context.Context, clientset kubernetes.Interface, nb *netbox.Client, nc *negativeCache, excluded map[string]struct{}) {
 	nodes, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	if err != nil {
@@ -269,12 +278,14 @@ func reconcileAll(ctx context.Context, clientset kubernetes.Interface, nb *netbo
 	}
 }
 
+// sanitizeLabel normalizes a string for use as a Kubernetes label value.
 func sanitizeLabel(s string) string {
 	s = strings.ToLower(s)
 	s = strings.ReplaceAll(s, " ", "-")
 	return s
 }
 
+// isValidLabel checks if a string is a valid Kubernetes label value.
 func isValidLabel(s string) bool {
 	if len(s) == 0 || len(s) > maxLabelLength {
 		return false
@@ -282,6 +293,7 @@ func isValidLabel(s string) bool {
 	return labelRegexp.MatchString(s)
 }
 
+// serveHealth starts the HTTP server for health probes and Prometheus metrics.
 func serveHealth(ready *atomic.Bool) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -316,6 +328,7 @@ type negativeCache struct {
 	ttl   time.Duration
 }
 
+// newNegativeCache creates a cache that remembers missed lookups for the given TTL.
 func newNegativeCache(ttl time.Duration) *negativeCache {
 	return &negativeCache{
 		items: make(map[string]time.Time),
@@ -323,12 +336,14 @@ func newNegativeCache(ttl time.Duration) *negativeCache {
 	}
 }
 
+// Set adds a key to the negative cache with the current timestamp.
 func (c *negativeCache) Set(key string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.items[key] = time.Now()
 }
 
+// Has returns true if the key is in the cache and hasn't expired.
 func (c *negativeCache) Has(key string) bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -339,12 +354,14 @@ func (c *negativeCache) Has(key string) bool {
 	return time.Since(t) < c.ttl
 }
 
+// Clear removes all entries from the cache.
 func (c *negativeCache) Clear() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.items = make(map[string]time.Time)
 }
 
+// mustEnv returns the value of the given environment variable or exits if unset.
 func mustEnv(key string) string {
 	val := os.Getenv(key)
 	if val == "" {
