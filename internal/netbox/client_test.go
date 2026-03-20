@@ -170,8 +170,9 @@ func TestGetDeviceRack_NoRetryOnNotFound(t *testing.T) {
 	if !IsNotFound(err) {
 		t.Fatalf("expected not found error, got: %v", err)
 	}
-	if got := attempts.Load(); got != 1 {
-		t.Errorf("expected 1 attempt (no retry for not found), got %d", got)
+	// 2 attempts: device lookup (not found) + VM fallback (not found), no retries
+	if got := attempts.Load(); got != 2 {
+		t.Errorf("expected 2 attempts (device + VM lookup, no retry), got %d", got)
 	}
 }
 
@@ -207,5 +208,101 @@ func TestGetDeviceRack_NoRetryOnInvalidJSON(t *testing.T) {
 	}
 	if got := attempts.Load(); got != 1 {
 		t.Errorf("expected 1 attempt (no retry for decode error), got %d", got)
+	}
+}
+
+func TestGetRack_FallbackToVM(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/dcim/devices/" && r.URL.Query().Get("name") == "us-omic-lw-dc1":
+			w.Write([]byte(`{"count":0,"results":[]}`))
+		case r.URL.Path == "/api/virtualization/virtual-machines/" && r.URL.Query().Get("name") == "us-omic-lw-dc1":
+			w.Write([]byte(`{"count":1,"results":[{"id":10,"name":"us-omic-lw-dc1","device":{"id":49,"name":"us-omicron-lw-proxmox-01"}}]}`))
+		case r.URL.Path == "/api/dcim/devices/49/":
+			w.Write([]byte(`{"id":49,"name":"us-omicron-lw-proxmox-01","rack":{"id":35,"name":"L130-B15"}}`))
+		default:
+			t.Errorf("unexpected request: %s", r.URL.String())
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-token")
+	rack, err := client.GetDeviceRack(context.Background(), "us-omic-lw-dc1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rack != "L130-B15" {
+		t.Errorf("expected L130-B15, got %s", rack)
+	}
+}
+
+func TestGetRack_VMNotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"count":0,"results":[]}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-token")
+	_, err := client.GetDeviceRack(context.Background(), "unknown-vm")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !IsNotFound(err) {
+		t.Errorf("expected not found error, got: %v", err)
+	}
+}
+
+func TestGetRack_VMNoHost(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/dcim/devices/":
+			w.Write([]byte(`{"count":0,"results":[]}`))
+		case r.URL.Path == "/api/virtualization/virtual-machines/":
+			w.Write([]byte(`{"count":1,"results":[{"id":10,"name":"orphan-vm","device":null}]}`))
+		default:
+			t.Errorf("unexpected request: %s", r.URL.String())
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-token")
+	_, err := client.GetDeviceRack(context.Background(), "orphan-vm")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !IsNoHost(err) {
+		t.Errorf("expected no host error, got: %v", err)
+	}
+}
+
+func TestGetRack_VMHostNoRack(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/dcim/devices/" && r.URL.Query().Get("name") != "":
+			w.Write([]byte(`{"count":0,"results":[]}`))
+		case r.URL.Path == "/api/virtualization/virtual-machines/":
+			w.Write([]byte(`{"count":1,"results":[{"id":10,"name":"vm-no-rack","device":{"id":99,"name":"host-no-rack"}}]}`))
+		case r.URL.Path == "/api/dcim/devices/99/":
+			w.Write([]byte(`{"id":99,"name":"host-no-rack","rack":null}`))
+		default:
+			t.Errorf("unexpected request: %s", r.URL.String())
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-token")
+	_, err := client.GetDeviceRack(context.Background(), "vm-no-rack")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !IsNoRack(err) {
+		t.Errorf("expected no rack error, got: %v", err)
 	}
 }
