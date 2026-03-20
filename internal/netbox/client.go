@@ -134,6 +134,35 @@ func (c *Client) getRack(ctx context.Context, hostname string) (string, error) {
 	return c.getVMRack(ctx, hostname)
 }
 
+// doJSONGet performs an authenticated GET request and decodes the JSON response
+// into out. It classifies 5xx/429 as retryable and other non-200 as permanent errors.
+func (c *Client) doJSONGet(ctx context.Context, rawURL string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Authorization", "Token "+c.token)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("request netbox: %w: %w", errRetryable, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests {
+		return fmt.Errorf("netbox returned status %d: %w", resp.StatusCode, errRetryable)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("netbox returned status %d", resp.StatusCode)
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		return fmt.Errorf("decode response: %w", err)
+	}
+	return nil
+}
+
 func (c *Client) getDeviceRack(ctx context.Context, hostname string) (string, error) {
 	u, err := url.Parse(c.baseURL + "/api/dcim/devices/")
 	if err != nil {
@@ -143,33 +172,9 @@ func (c *Client) getDeviceRack(ctx context.Context, hostname string) (string, er
 	q.Set("name", hostname)
 	u.RawQuery = q.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
-	if err != nil {
-		return "", fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("Authorization", "Token "+c.token)
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		// Network/transport errors are retryable
-		return "", fmt.Errorf("request netbox: %w: %w", errRetryable, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests {
-		// 5xx and 429 are retryable
-		return "", fmt.Errorf("netbox returned status %d: %w", resp.StatusCode, errRetryable)
-	}
-	if resp.StatusCode != http.StatusOK {
-		// Other non-200 (401, 403, 404, etc.) are permanent
-		return "", fmt.Errorf("netbox returned status %d", resp.StatusCode)
-	}
-
 	var result deviceListResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		// Decode errors are permanent (bad response shape)
-		return "", fmt.Errorf("decode response: %w", err)
+	if err := c.doJSONGet(ctx, u.String(), &result); err != nil {
+		return "", err
 	}
 
 	if len(result.Results) == 0 {
@@ -205,29 +210,9 @@ func (c *Client) getVMHostDeviceID(ctx context.Context, hostname string) (int, e
 	q.Set("name", hostname)
 	u.RawQuery = q.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
-	if err != nil {
-		return 0, fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("Authorization", "Token "+c.token)
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return 0, fmt.Errorf("request netbox: %w: %w", errRetryable, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests {
-		return 0, fmt.Errorf("netbox returned status %d: %w", resp.StatusCode, errRetryable)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("netbox returned status %d", resp.StatusCode)
-	}
-
 	var result vmListResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return 0, fmt.Errorf("decode response: %w", err)
+	if err := c.doJSONGet(ctx, u.String(), &result); err != nil {
+		return 0, err
 	}
 
 	if len(result.Results) == 0 {
@@ -246,29 +231,9 @@ func (c *Client) getVMHostDeviceID(ctx context.Context, hostname string) (int, e
 func (c *Client) getDeviceRackByID(ctx context.Context, deviceID int) (string, error) {
 	u := fmt.Sprintf("%s/api/dcim/devices/%d/", c.baseURL, deviceID)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
-	if err != nil {
-		return "", fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("Authorization", "Token "+c.token)
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("request netbox: %w: %w", errRetryable, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests {
-		return "", fmt.Errorf("netbox returned status %d: %w", resp.StatusCode, errRetryable)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("netbox returned status %d", resp.StatusCode)
-	}
-
 	var device Device
-	if err := json.NewDecoder(resp.Body).Decode(&device); err != nil {
-		return "", fmt.Errorf("decode response: %w", err)
+	if err := c.doJSONGet(ctx, u, &device); err != nil {
+		return "", err
 	}
 
 	if device.Rack == nil {
