@@ -212,7 +212,9 @@ func TestGetDeviceRack_NoRetryOnInvalidJSON(t *testing.T) {
 }
 
 func TestGetRack_FallbackToVM(t *testing.T) {
+	var paths []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.URL.Path == "/api/dcim/devices/" && r.URL.Query().Get("name") == "us-omic-lw-dc1":
@@ -235,6 +237,20 @@ func TestGetRack_FallbackToVM(t *testing.T) {
 	}
 	if rack != "L130-B15" {
 		t.Errorf("expected L130-B15, got %s", rack)
+	}
+
+	expectedPaths := []string{
+		"/api/dcim/devices/",
+		"/api/virtualization/virtual-machines/",
+		"/api/dcim/devices/49/",
+	}
+	if len(paths) != len(expectedPaths) {
+		t.Fatalf("expected %d requests, got %d: %v", len(expectedPaths), len(paths), paths)
+	}
+	for i, p := range expectedPaths {
+		if paths[i] != p {
+			t.Errorf("request %d: expected path %s, got %s", i, p, paths[i])
+		}
 	}
 }
 
