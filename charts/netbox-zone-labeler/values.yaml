@@ -4,7 +4,7 @@ image:
   pullPolicy: IfNotPresent
 
 tbot:
-  image: public.ecr.aws/gravitational/tbot-distroless:18.7.3
+  image: public.ecr.aws/gravitational/tbot-distroless:18.7.4
   proxyServer: teleport.maestra.io:443
   appName: netbox
   port: 8080
