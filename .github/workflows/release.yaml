@@ -80,7 +80,7 @@ jobs:
           echo "$PASSWORD" | docker login ${{ env.ECR_REGISTRY }} --username AWS --password-stdin
           echo "$PASSWORD" | helm registry login ${{ env.ECR_REGISTRY }} --username AWS --password-stdin
 
-      - uses: docker/metadata-action@v5
+      - uses: docker/metadata-action@v6
         id: meta
         with:
           images: ${{ env.ECR_REGISTRY }}/netbox-zone-labeler
