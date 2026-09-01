@@ -3,4 +3,5 @@
 charts
 hack
 *.md
+.golangci.yml
 .dockerignore

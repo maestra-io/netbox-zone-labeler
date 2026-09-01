@@ -23,6 +23,9 @@ jobs:
       - run: go vet ./...
       - run: go test -race -count=1 ./...
       - run: go build -o /dev/null .
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.13.2
       - uses: golang/govulncheck-action@v1
         with:
           go-version-file: go.mod

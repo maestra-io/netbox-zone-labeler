@@ -2,323 +2,272 @@ package netbox
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
-	"sync/atomic"
+	"sync"
 	"testing"
+	"time"
 )
 
-func TestGetDeviceRack_Success(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/dcim/devices/" {
-			t.Errorf("unexpected path: %s", r.URL.Path)
-		}
-		if r.URL.Query().Get("name") != "node-1" {
-			t.Errorf("unexpected name param: %s", r.URL.Query().Get("name"))
-		}
-		if r.Header.Get("Authorization") != "Token test-token" {
-			t.Errorf("unexpected auth header: %s", r.Header.Get("Authorization"))
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"count":1,"results":[{"id":1,"name":"node-1","rack":{"id":1,"name":"Rack-42"}}]}`))
-	}))
-	defer server.Close()
+// recorder is an httptest handler that records every request and answers
+// from a per-path function.
+type recorder struct {
+	mu    sync.Mutex
+	reqs  []*http.Request
+	serve func(w http.ResponseWriter, r *http.Request)
+}
 
-	client := NewClient(server.URL, "test-token")
-	rack, err := client.GetDeviceRack(context.Background(), "node-1")
+func (rec *recorder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	rec.mu.Lock()
+	rec.reqs = append(rec.reqs, r.Clone(r.Context()))
+	rec.mu.Unlock()
+	rec.serve(w, r)
+}
+
+func (rec *recorder) paths() []string {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	out := make([]string, len(rec.reqs))
+	for i, r := range rec.reqs {
+		out[i] = r.URL.Path
+	}
+	return out
+}
+
+func newClient(t *testing.T, serve func(w http.ResponseWriter, r *http.Request)) (*Client, *recorder) {
+	t.Helper()
+	rec := &recorder{serve: serve}
+	srv := httptest.NewServer(rec)
+	t.Cleanup(srv.Close)
+	return NewClient(srv.URL, "test-token", WithRetry(3, 0)), rec
+}
+
+func jsonOK(w http.ResponseWriter, body string) {
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(body))
+}
+
+const (
+	deviceWithRack = `{"count":1,"results":[{"id":1,"name":"node-1","rack":{"id":1,"name":"Rack-42"}}]}`
+	empty          = `{"count":0,"results":[]}`
+)
+
+func TestLookupRack_Device(t *testing.T) {
+	c, rec := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Token test-token" {
+			t.Errorf("Authorization = %q", got)
+		}
+		if got := r.URL.Query().Get("name"); got != "node-1" {
+			t.Errorf("name = %q", got)
+		}
+		if got := r.URL.Query().Get("limit"); got != "2" {
+			t.Errorf("limit = %q, want 2 (ambiguity detection)", got)
+		}
+		jsonOK(w, deviceWithRack)
+	})
+	rack, err := c.LookupRack(context.Background(), "node-1")
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatal(err)
 	}
 	if rack != "Rack-42" {
-		t.Errorf("expected Rack-42, got %s", rack)
+		t.Errorf("rack = %q", rack)
+	}
+	if p := rec.paths(); len(p) != 1 || p[0] != "/api/dcim/devices/" {
+		t.Errorf("paths = %v", p)
 	}
 }
 
-func TestGetDeviceRack_NotFound(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"count":0,"results":[]}`))
-	}))
-	defer server.Close()
-
-	client := NewClient(server.URL, "test-token")
-	_, err := client.GetDeviceRack(context.Background(), "unknown")
-	if err == nil {
-		t.Fatal("expected error, got nil")
+func TestLookupRack_TrailingSlashInBaseURL(t *testing.T) {
+	rec := &recorder{serve: func(w http.ResponseWriter, _ *http.Request) { jsonOK(w, deviceWithRack) }}
+	srv := httptest.NewServer(rec)
+	defer srv.Close()
+	c := NewClient(srv.URL+"/", "tok")
+	if _, err := c.LookupRack(context.Background(), "node-1"); err != nil {
+		t.Fatal(err)
 	}
-	if !IsNotFound(err) {
-		t.Errorf("expected not found error, got: %v", err)
+	if p := rec.paths(); p[0] != "/api/dcim/devices/" {
+		t.Errorf("path = %q, double slash not trimmed", p[0])
 	}
 }
 
-func TestGetDeviceRack_NoRack(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"count":1,"results":[{"id":1,"name":"node-1","rack":null}]}`))
-	}))
-	defer server.Close()
-
-	client := NewClient(server.URL, "test-token")
-	_, err := client.GetDeviceRack(context.Background(), "node-1")
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !IsNoRack(err) {
-		t.Errorf("expected no rack error, got: %v", err)
-	}
-}
-
-func TestGetDeviceRack_ServerErrorRetries(t *testing.T) {
-	var attempts atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		attempts.Add(1)
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer server.Close()
-
-	client := NewClient(server.URL, "test-token")
-	_, err := client.GetDeviceRack(context.Background(), "node-1")
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if got := attempts.Load(); got != int32(maxRetries+1) {
-		t.Errorf("expected %d attempts (retries on 5xx), got %d", maxRetries+1, got)
-	}
-}
-
-func TestGetDeviceRack_RetryOnTransientThenSuccess(t *testing.T) {
-	var attempts atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		attempts.Add(1)
-		if attempts.Load() < 3 {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"count":1,"results":[{"id":1,"name":"node-1","rack":{"id":1,"name":"Rack-1"}}]}`))
-	}))
-	defer server.Close()
-
-	client := NewClient(server.URL, "test-token")
-	rack, err := client.GetDeviceRack(context.Background(), "node-1")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if rack != "Rack-1" {
-		t.Errorf("expected Rack-1, got %s", rack)
-	}
-	if got := attempts.Load(); got != 3 {
-		t.Errorf("expected 3 attempts, got %d", got)
-	}
-}
-
-func TestGetDeviceRack_RetryOn429(t *testing.T) {
-	var attempts atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		attempts.Add(1)
-		if attempts.Load() < 2 {
-			w.WriteHeader(http.StatusTooManyRequests)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"count":1,"results":[{"id":1,"name":"node-1","rack":{"id":1,"name":"Rack-1"}}]}`))
-	}))
-	defer server.Close()
-
-	client := NewClient(server.URL, "test-token")
-	rack, err := client.GetDeviceRack(context.Background(), "node-1")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if rack != "Rack-1" {
-		t.Errorf("expected Rack-1, got %s", rack)
-	}
-	if got := attempts.Load(); got != 2 {
-		t.Errorf("expected 2 attempts (retry on 429), got %d", got)
-	}
-}
-
-func TestGetDeviceRack_NoRetryOn4xx(t *testing.T) {
-	var attempts atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		attempts.Add(1)
-		w.WriteHeader(http.StatusForbidden)
-	}))
-	defer server.Close()
-
-	client := NewClient(server.URL, "test-token")
-	_, err := client.GetDeviceRack(context.Background(), "node-1")
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if got := attempts.Load(); got != 1 {
-		t.Errorf("expected 1 attempt (no retry for 403), got %d", got)
-	}
-}
-
-func TestGetDeviceRack_NoRetryOnNotFound(t *testing.T) {
-	var attempts atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		attempts.Add(1)
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"count":0,"results":[]}`))
-	}))
-	defer server.Close()
-
-	client := NewClient(server.URL, "test-token")
-	_, err := client.GetDeviceRack(context.Background(), "unknown")
-	if !IsNotFound(err) {
-		t.Fatalf("expected not found error, got: %v", err)
-	}
-	// 2 attempts: device lookup (not found) + VM fallback (not found), no retries
-	if got := attempts.Load(); got != 2 {
-		t.Errorf("expected 2 attempts (device + VM lookup, no retry), got %d", got)
-	}
-}
-
-func TestGetDeviceRack_NoRetryOnNoRack(t *testing.T) {
-	var attempts atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		attempts.Add(1)
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"count":1,"results":[{"id":1,"name":"node-1","rack":null}]}`))
-	}))
-	defer server.Close()
-
-	client := NewClient(server.URL, "test-token")
-	_, _ = client.GetDeviceRack(context.Background(), "node-1")
-	if got := attempts.Load(); got != 1 {
-		t.Errorf("expected 1 attempt (no retry for no rack), got %d", got)
-	}
-}
-
-func TestGetDeviceRack_NoRetryOnInvalidJSON(t *testing.T) {
-	var attempts atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		attempts.Add(1)
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`not json`))
-	}))
-	defer server.Close()
-
-	client := NewClient(server.URL, "test-token")
-	_, err := client.GetDeviceRack(context.Background(), "node-1")
-	if err == nil {
-		t.Fatal("expected error for invalid JSON")
-	}
-	if got := attempts.Load(); got != 1 {
-		t.Errorf("expected 1 attempt (no retry for decode error), got %d", got)
-	}
-}
-
-func TestGetRack_FallbackToVM(t *testing.T) {
-	var paths []string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		paths = append(paths, r.URL.Path)
-		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.URL.Path == "/api/dcim/devices/" && r.URL.Query().Get("name") == "us-omic-lw-dc1":
-			w.Write([]byte(`{"count":0,"results":[]}`))
-		case r.URL.Path == "/api/virtualization/virtual-machines/" && r.URL.Query().Get("name") == "us-omic-lw-dc1":
-			w.Write([]byte(`{"count":1,"results":[{"id":10,"name":"us-omic-lw-dc1","device":{"id":49,"name":"us-omicron-lw-proxmox-01"}}]}`))
-		case r.URL.Path == "/api/dcim/devices/49/":
-			w.Write([]byte(`{"id":49,"name":"us-omicron-lw-proxmox-01","rack":{"id":35,"name":"L130-B15"}}`))
+func TestLookupRack_VMFallback(t *testing.T) {
+	c, rec := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/dcim/devices/":
+			jsonOK(w, empty)
+		case "/api/virtualization/virtual-machines/":
+			if r.URL.Query().Get("name") != "vm-1" {
+				t.Errorf("vm name = %q", r.URL.Query().Get("name"))
+			}
+			jsonOK(w, `{"count":1,"results":[{"id":10,"name":"vm-1","device":{"id":49,"name":"hv-1"}}]}`)
+		case "/api/dcim/devices/49/":
+			jsonOK(w, `{"id":49,"name":"hv-1","rack":{"id":35,"name":"L130-B15"}}`)
 		default:
-			t.Errorf("unexpected request: %s", r.URL.String())
+			t.Errorf("unexpected request %s", r.URL)
 			w.WriteHeader(http.StatusNotFound)
 		}
-	}))
-	defer server.Close()
-
-	client := NewClient(server.URL, "test-token")
-	rack, err := client.GetDeviceRack(context.Background(), "us-omic-lw-dc1")
+	})
+	rack, err := c.LookupRack(context.Background(), "vm-1")
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatal(err)
 	}
 	if rack != "L130-B15" {
-		t.Errorf("expected L130-B15, got %s", rack)
+		t.Errorf("rack = %q", rack)
 	}
-
-	expectedPaths := []string{
-		"/api/dcim/devices/",
-		"/api/virtualization/virtual-machines/",
-		"/api/dcim/devices/49/",
-	}
-	if len(paths) != len(expectedPaths) {
-		t.Fatalf("expected %d requests, got %d: %v", len(expectedPaths), len(paths), paths)
-	}
-	for i, p := range expectedPaths {
-		if paths[i] != p {
-			t.Errorf("request %d: expected path %s, got %s", i, p, paths[i])
-		}
+	want := []string{"/api/dcim/devices/", "/api/virtualization/virtual-machines/", "/api/dcim/devices/49/"}
+	if got := rec.paths(); len(got) != len(want) || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+		t.Errorf("paths = %v, want %v", got, want)
 	}
 }
 
-func TestGetRack_VMNotFound(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"count":0,"results":[]}`))
-	}))
-	defer server.Close()
-
-	client := NewClient(server.URL, "test-token")
-	_, err := client.GetDeviceRack(context.Background(), "unknown-vm")
-	if err == nil {
-		t.Fatal("expected error, got nil")
+func TestLookupRack_NoZone(t *testing.T) {
+	cases := map[string]struct {
+		devices, vms, host string
+		wantRequests       int
+	}{
+		"device without rack": {devices: `{"count":1,"results":[{"id":1,"name":"n","rack":null}]}`, wantRequests: 1},
+		"unknown everywhere":  {devices: empty, vms: empty, wantRequests: 2},
+		"vm without host":     {devices: empty, vms: `{"count":1,"results":[{"id":10,"name":"n","device":null}]}`, wantRequests: 2},
+		"vm host without rack": {
+			devices: empty,
+			vms:     `{"count":1,"results":[{"id":10,"name":"n","device":{"id":49,"name":"hv"}}]}`,
+			host:    `{"id":49,"name":"hv","rack":null}`, wantRequests: 3,
+		},
 	}
-	if !IsNotFound(err) {
-		t.Errorf("expected not found error, got: %v", err)
-	}
-}
-
-func TestGetRack_VMNoHost(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.URL.Path == "/api/dcim/devices/":
-			w.Write([]byte(`{"count":0,"results":[]}`))
-		case r.URL.Path == "/api/virtualization/virtual-machines/":
-			w.Write([]byte(`{"count":1,"results":[{"id":10,"name":"orphan-vm","device":null}]}`))
-		default:
-			t.Errorf("unexpected request: %s", r.URL.String())
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer server.Close()
-
-	client := NewClient(server.URL, "test-token")
-	_, err := client.GetDeviceRack(context.Background(), "orphan-vm")
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !IsNoHost(err) {
-		t.Errorf("expected no host error, got: %v", err)
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			c, rec := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/dcim/devices/":
+					jsonOK(w, tc.devices)
+				case "/api/virtualization/virtual-machines/":
+					jsonOK(w, tc.vms)
+				case "/api/dcim/devices/49/":
+					jsonOK(w, tc.host)
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			})
+			_, err := c.LookupRack(context.Background(), "n")
+			if !errors.Is(err, ErrNoZone) {
+				t.Fatalf("err = %v, want ErrNoZone", err)
+			}
+			if got := len(rec.paths()); got != tc.wantRequests {
+				t.Errorf("requests = %d, want %d (permanent miss must not retry)", got, tc.wantRequests)
+			}
+		})
 	}
 }
 
-func TestGetRack_VMHostNoRack(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.URL.Path == "/api/dcim/devices/" && r.URL.Query().Get("name") != "":
-			w.Write([]byte(`{"count":0,"results":[]}`))
-		case r.URL.Path == "/api/virtualization/virtual-machines/":
-			w.Write([]byte(`{"count":1,"results":[{"id":10,"name":"vm-no-rack","device":{"id":99,"name":"host-no-rack"}}]}`))
-		case r.URL.Path == "/api/dcim/devices/99/":
-			w.Write([]byte(`{"id":99,"name":"host-no-rack","rack":null}`))
-		default:
-			t.Errorf("unexpected request: %s", r.URL.String())
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer server.Close()
-
-	client := NewClient(server.URL, "test-token")
-	_, err := client.GetDeviceRack(context.Background(), "vm-no-rack")
-	if err == nil {
-		t.Fatal("expected error, got nil")
+func TestLookupRack_Ambiguous(t *testing.T) {
+	c, rec := newClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		jsonOK(w, `{"count":2,"results":[{"id":1,"name":"n","rack":{"id":1,"name":"A"}},{"id":2,"name":"n","rack":{"id":2,"name":"B"}}]}`)
+	})
+	_, err := c.LookupRack(context.Background(), "n")
+	if !errors.Is(err, ErrAmbiguous) {
+		t.Fatalf("err = %v, want ErrAmbiguous", err)
 	}
-	if !IsNoRack(err) {
-		t.Errorf("expected no rack error, got: %v", err)
+	if errors.Is(err, ErrNoZone) {
+		t.Error("ambiguous must not read as a miss")
+	}
+	if got := len(rec.paths()); got != 1 {
+		t.Errorf("requests = %d, want 1 (no VM fallback, no retry)", got)
+	}
+}
+
+func TestLookupRack_Retries(t *testing.T) {
+	cases := map[string]struct {
+		status       int
+		wantAttempts int
+	}{
+		"5xx exhausts retries": {status: http.StatusInternalServerError, wantAttempts: 4},
+		"429 is retried":       {status: http.StatusTooManyRequests, wantAttempts: 4},
+		"403 is permanent":     {status: http.StatusForbidden, wantAttempts: 1},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			c, rec := newClient(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(tc.status) })
+			_, err := c.LookupRack(context.Background(), "n")
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if errors.Is(err, ErrNoZone) {
+				t.Error("HTTP failure must not read as a miss")
+			}
+			if got := len(rec.paths()); got != tc.wantAttempts {
+				t.Errorf("attempts = %d, want %d", got, tc.wantAttempts)
+			}
+		})
+	}
+}
+
+func TestLookupRack_TransientThenSuccess(t *testing.T) {
+	var n int
+	var mu sync.Mutex
+	c, rec := newClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		n++
+		attempt := n
+		mu.Unlock()
+		if attempt < 3 {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		jsonOK(w, deviceWithRack)
+	})
+	rack, err := c.LookupRack(context.Background(), "node-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rack != "Rack-42" || len(rec.paths()) != 3 {
+		t.Errorf("rack = %q after %d attempts", rack, len(rec.paths()))
+	}
+}
+
+func TestLookupRack_InvalidJSONIsPermanent(t *testing.T) {
+	c, rec := newClient(t, func(w http.ResponseWriter, _ *http.Request) { jsonOK(w, "not json") })
+	if _, err := c.LookupRack(context.Background(), "n"); err == nil {
+		t.Fatal("expected error")
+	}
+	if got := len(rec.paths()); got != 1 {
+		t.Errorf("attempts = %d, want 1", got)
+	}
+}
+
+func TestLookupRack_CancelledDuringBackoff(t *testing.T) {
+	rec := &recorder{serve: func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusInternalServerError) }}
+	srv := httptest.NewServer(rec)
+	defer srv.Close()
+	c := NewClient(srv.URL, "tok", WithRetry(3, time.Hour))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+	start := time.Now()
+	_, err := c.LookupRack(ctx, "n")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Error("cancellation did not interrupt the backoff")
+	}
+}
+
+func TestPing(t *testing.T) {
+	c, _ := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/status/" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		jsonOK(w, `{"netbox-version":"4.2.0"}`)
+	})
+	if err := c.Ping(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	down, _ := newClient(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusBadGateway) })
+	if err := down.Ping(context.Background()); err == nil {
+		t.Fatal("expected error from a 502")
 	}
 }

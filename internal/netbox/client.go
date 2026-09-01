@@ -1,3 +1,6 @@
+// Package netbox is the small read-only NetBox API client the labeler needs:
+// it resolves a Kubernetes node name to the NetBox rack of the device, or of
+// the host device when the node is a virtual machine.
 package netbox
 
 import (
@@ -5,111 +8,128 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
 const (
-	maxRetries     = 3
-	initialBackoff = 500 * time.Millisecond
+	defaultTimeout    = 10 * time.Second
+	defaultMaxRetries = 3
+	defaultBackoff    = 500 * time.Millisecond
 )
 
 var (
-	errNotFound  = errors.New("device not found in netbox")
-	errNoRack    = errors.New("device has no rack assigned")
+	// ErrNoZone is returned when NetBox cannot yield a rack for the host, for
+	// any of the permanent reasons below (the wrapped error says which). The
+	// caller treats it as a miss to retry on its next full pass, not as an
+	// error.
+	ErrNoZone = errors.New("no zone in netbox")
+
+	// ErrAmbiguous is returned when more than one device or VM carries the
+	// name; NetBox names are unique only per site/tenant, and guessing would
+	// label the node with the wrong rack.
+	ErrAmbiguous = errors.New("ambiguous name in netbox")
+
+	errNotFound  = errors.New("device not found")
+	errNoRack    = errors.New("device has no rack")
+	errNoHost    = errors.New("VM has no host device")
 	errRetryable = errors.New("retryable error")
-	errNoHost    = errors.New("VM has no host device assigned")
 )
 
-// IsNotFound reports whether the error indicates a device was not found in NetBox.
-func IsNotFound(err error) bool {
-	return errors.Is(err, errNotFound)
+// RackLookup is what the labeler needs from NetBox.
+type RackLookup interface {
+	LookupRack(ctx context.Context, hostname string) (string, error)
 }
 
-// IsNoRack reports whether the error indicates a device has no rack assigned.
-func IsNoRack(err error) bool {
-	return errors.Is(err, errNoRack)
-}
-
-// IsNoHost reports whether the error indicates a VM has no host device assigned.
-func IsNoHost(err error) bool {
-	return errors.Is(err, errNoHost)
-}
-
-// IsRetryable reports whether the error is transient and worth retrying.
-func IsRetryable(err error) bool {
-	return errors.Is(err, errRetryable)
-}
-
+// Client is a NetBox REST API client.
 type Client struct {
 	baseURL    string
 	token      string
 	httpClient *http.Client
+	maxRetries int
+	backoff    time.Duration
 }
 
-// NewClient creates a NetBox API client with the given base URL and auth token.
-func NewClient(baseURL, token string) *Client {
-	return &Client{
-		baseURL: baseURL,
-		token:   token,
-		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
-		},
+// Option configures a Client.
+type Option func(*Client)
+
+// WithTimeout sets the per-request HTTP timeout (default 10s).
+func WithTimeout(d time.Duration) Option {
+	return func(c *Client) { c.httpClient.Timeout = d }
+}
+
+// WithRetry sets how many times a transient failure is retried and the
+// initial backoff, which doubles on every attempt (default 3 and 500ms).
+func WithRetry(maxRetries int, initialBackoff time.Duration) Option {
+	return func(c *Client) {
+		c.maxRetries = maxRetries
+		c.backoff = initialBackoff
 	}
 }
 
-type deviceListResponse struct {
-	Count   int      `json:"count"`
-	Results []Device `json:"results"`
+// NewClient creates a NetBox API client for baseURL authenticating with token.
+func NewClient(baseURL, token string, opts ...Option) *Client {
+	c := &Client{
+		baseURL:    strings.TrimRight(baseURL, "/"),
+		token:      token,
+		httpClient: &http.Client{Timeout: defaultTimeout},
+		maxRetries: defaultMaxRetries,
+		backoff:    defaultBackoff,
+	}
+	for _, o := range opts {
+		o(c)
+	}
+	return c
 }
 
-type Device struct {
-	ID   int    `json:"id"`
-	Name string `json:"name"`
-	Rack *Rack  `json:"rack"`
-}
-
-type Rack struct {
-	ID   int    `json:"id"`
-	Name string `json:"name"`
-}
-
-type vmListResponse struct {
-	Count   int  `json:"count"`
-	Results []VM `json:"results"`
-}
-
-type VM struct {
-	ID     int     `json:"id"`
-	Name   string  `json:"name"`
-	Device *VMHost `json:"device"`
-}
-
-type VMHost struct {
+type namedRef struct {
 	ID   int    `json:"id"`
 	Name string `json:"name"`
 }
 
-// GetDeviceRack returns the rack name for a device identified by hostname.
-// It first searches in dcim/devices. If the device is not found, it falls back
-// to virtualization/virtual-machines and resolves the rack via the VM's host device.
-// It retries only transient errors (network errors, 5xx, 429) with exponential
-// backoff. Permanent errors (not found, no rack, 4xx, decode errors) are
-// returned immediately.
-func (c *Client) GetDeviceRack(ctx context.Context, hostname string) (string, error) {
+type device struct {
+	ID   int       `json:"id"`
+	Name string    `json:"name"`
+	Rack *namedRef `json:"rack"`
+}
+
+type virtualMachine struct {
+	ID     int       `json:"id"`
+	Name   string    `json:"name"`
+	Device *namedRef `json:"device"`
+}
+
+type listResponse[T any] struct {
+	Count   int `json:"count"`
+	Results []T `json:"results"`
+}
+
+// Ping checks that NetBox answers authenticated requests.
+func (c *Client) Ping(ctx context.Context) error {
+	var status map[string]any
+	return c.get(ctx, "/api/status/", nil, &status)
+}
+
+// LookupRack returns the rack name for hostname. It looks in dcim/devices
+// first; when the name is not a device it falls back to
+// virtualization/virtual-machines and resolves the rack through the VM's host
+// device. Transient failures (network errors, 5xx, 429) are retried with
+// exponential backoff; permanent ones (ErrNoZone, ErrAmbiguous, other 4xx,
+// malformed responses) are returned at once.
+func (c *Client) LookupRack(ctx context.Context, hostname string) (string, error) {
 	var lastErr error
-	for attempt := range maxRetries + 1 {
+	for attempt := range c.maxRetries + 1 {
 		if attempt > 0 {
-			backoff := initialBackoff * time.Duration(1<<(attempt-1))
 			select {
 			case <-ctx.Done():
 				return "", ctx.Err()
-			case <-time.After(backoff):
+			case <-time.After(c.backoff * time.Duration(1<<(attempt-1))):
 			}
 		}
-
-		rack, err := c.getRack(ctx, hostname)
+		rack, err := c.lookupRack(ctx, hostname)
 		if err == nil {
 			return rack, nil
 		}
@@ -118,26 +138,67 @@ func (c *Client) GetDeviceRack(ctx context.Context, hostname string) (string, er
 		}
 		lastErr = err
 	}
-	return "", fmt.Errorf("after %d retries: %w", maxRetries, lastErr)
+	return "", fmt.Errorf("after %d retries: %w", c.maxRetries, lastErr)
 }
 
-// getRack tries to find the rack first as a device, then as a VM.
-func (c *Client) getRack(ctx context.Context, hostname string) (string, error) {
-	rack, err := c.getDeviceRack(ctx, hostname)
-	if err == nil {
-		return rack, nil
+func (c *Client) lookupRack(ctx context.Context, hostname string) (string, error) {
+	rack, err := c.deviceRack(ctx, hostname)
+	if err == nil || !errors.Is(err, errNotFound) {
+		return rack, err
 	}
-	if !errors.Is(err, errNotFound) {
+	return c.vmRack(ctx, hostname)
+}
+
+func (c *Client) deviceRack(ctx context.Context, hostname string) (string, error) {
+	var resp listResponse[device]
+	if err := c.get(ctx, "/api/dcim/devices/", url.Values{"name": {hostname}, "limit": {"2"}}, &resp); err != nil {
 		return "", err
 	}
-
-	return c.getVMRack(ctx, hostname)
+	switch {
+	case len(resp.Results) == 0:
+		return "", fmt.Errorf("device %q: %w: %w", hostname, ErrNoZone, errNotFound)
+	case len(resp.Results) > 1:
+		return "", fmt.Errorf("device %q: %w: %d matches", hostname, ErrAmbiguous, resp.Count)
+	case resp.Results[0].Rack == nil:
+		return "", fmt.Errorf("device %q: %w: %w", hostname, ErrNoZone, errNoRack)
+	}
+	return resp.Results[0].Rack.Name, nil
 }
 
-// doJSONGet performs an authenticated GET request and decodes the JSON response
-// into out. It classifies 5xx/429 as retryable and other non-200 as permanent errors.
-func (c *Client) doJSONGet(ctx context.Context, rawURL string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+func (c *Client) vmRack(ctx context.Context, hostname string) (string, error) {
+	var resp listResponse[virtualMachine]
+	if err := c.get(ctx, "/api/virtualization/virtual-machines/", url.Values{"name": {hostname}, "limit": {"2"}}, &resp); err != nil {
+		return "", err
+	}
+	switch {
+	case len(resp.Results) == 0:
+		return "", fmt.Errorf("VM %q: %w: %w", hostname, ErrNoZone, errNotFound)
+	case len(resp.Results) > 1:
+		return "", fmt.Errorf("VM %q: %w: %d matches", hostname, ErrAmbiguous, resp.Count)
+	case resp.Results[0].Device == nil:
+		return "", fmt.Errorf("VM %q: %w: %w", hostname, ErrNoZone, errNoHost)
+	}
+
+	host := resp.Results[0].Device
+	var dev device
+	if err := c.get(ctx, fmt.Sprintf("/api/dcim/devices/%d/", host.ID), nil, &dev); err != nil {
+		return "", err
+	}
+	if dev.Rack == nil {
+		return "", fmt.Errorf("VM %q host %q: %w: %w", hostname, host.Name, ErrNoZone, errNoRack)
+	}
+	return dev.Rack.Name, nil
+}
+
+// get performs an authenticated GET of path (with optional query) and decodes
+// the JSON body into out. 5xx and 429 are retryable, any other non-200 is
+// permanent.
+func (c *Client) get(ctx context.Context, path string, query url.Values, out any) error {
+	u := c.baseURL + path
+	if len(query) > 0 {
+		u += "?" + query.Encode()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
@@ -148,97 +209,20 @@ func (c *Client) doJSONGet(ctx context.Context, rawURL string, out any) error {
 	if err != nil {
 		return fmt.Errorf("request netbox: %w: %w", errRetryable, err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		// Drain so the keep-alive connection is reusable.
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
 
-	if resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests {
-		return fmt.Errorf("netbox returned status %d: %w", resp.StatusCode, errRetryable)
+	switch {
+	case resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests:
+		return fmt.Errorf("netbox %s: status %d: %w", path, resp.StatusCode, errRetryable)
+	case resp.StatusCode != http.StatusOK:
+		return fmt.Errorf("netbox %s: status %d", path, resp.StatusCode)
 	}
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("netbox returned status %d", resp.StatusCode)
-	}
-
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-		return fmt.Errorf("decode response: %w", err)
+		return fmt.Errorf("decode netbox %s: %w", path, err)
 	}
 	return nil
-}
-
-func (c *Client) getDeviceRack(ctx context.Context, hostname string) (string, error) {
-	u, err := url.Parse(c.baseURL + "/api/dcim/devices/")
-	if err != nil {
-		return "", fmt.Errorf("parse url: %w", err)
-	}
-	q := u.Query()
-	q.Set("name", hostname)
-	u.RawQuery = q.Encode()
-
-	var result deviceListResponse
-	if err := c.doJSONGet(ctx, u.String(), &result); err != nil {
-		return "", err
-	}
-
-	if len(result.Results) == 0 {
-		return "", fmt.Errorf("device %q: %w", hostname, errNotFound)
-	}
-
-	device := result.Results[0]
-	if device.Rack == nil {
-		return "", fmt.Errorf("device %q: %w", hostname, errNoRack)
-	}
-
-	return device.Rack.Name, nil
-}
-
-// getVMRack looks up a virtual machine by name, then resolves the rack
-// from its host device.
-func (c *Client) getVMRack(ctx context.Context, hostname string) (string, error) {
-	deviceID, err := c.getVMHostDeviceID(ctx, hostname)
-	if err != nil {
-		return "", err
-	}
-
-	return c.getDeviceRackByID(ctx, deviceID)
-}
-
-// getVMHostDeviceID searches for a VM by name and returns the ID of its host device.
-func (c *Client) getVMHostDeviceID(ctx context.Context, hostname string) (int, error) {
-	u, err := url.Parse(c.baseURL + "/api/virtualization/virtual-machines/")
-	if err != nil {
-		return 0, fmt.Errorf("parse url: %w", err)
-	}
-	q := u.Query()
-	q.Set("name", hostname)
-	u.RawQuery = q.Encode()
-
-	var result vmListResponse
-	if err := c.doJSONGet(ctx, u.String(), &result); err != nil {
-		return 0, err
-	}
-
-	if len(result.Results) == 0 {
-		return 0, fmt.Errorf("VM %q: %w", hostname, errNotFound)
-	}
-
-	vm := result.Results[0]
-	if vm.Device == nil {
-		return 0, fmt.Errorf("VM %q: %w", hostname, errNoHost)
-	}
-
-	return vm.Device.ID, nil
-}
-
-// getDeviceRackByID fetches a device by ID and returns its rack name.
-func (c *Client) getDeviceRackByID(ctx context.Context, deviceID int) (string, error) {
-	u := fmt.Sprintf("%s/api/dcim/devices/%d/", c.baseURL, deviceID)
-
-	var device Device
-	if err := c.doJSONGet(ctx, u, &device); err != nil {
-		return "", err
-	}
-
-	if device.Rack == nil {
-		return "", fmt.Errorf("device %d: %w", deviceID, errNoRack)
-	}
-
-	return device.Rack.Name, nil
 }
