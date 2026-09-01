@@ -80,6 +80,16 @@ jobs:
           echo "$PASSWORD" | docker login ${{ env.ECR_REGISTRY }} --username AWS --password-stdin
           echo "$PASSWORD" | helm registry login ${{ env.ECR_REGISTRY }} --username AWS --password-stdin
 
+      # Bare tag list that docker/metadata-action produces below, derived the same
+      # way the Helm chart step derives its version. metadata-action itself only
+      # emits full references, which the mirror step cannot consume.
+      - name: Derive pushed tags
+        id: tags
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "image_tags=${VERSION},${VERSION%.*}" >> "$GITHUB_OUTPUT"
+
       - uses: docker/metadata-action@v6
         id: meta
         with:
@@ -95,6 +105,20 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
+      # Mirror the pushed tags to us-west-2 — phase 3 dual-push of the ECR
+      # eu-central-1 -> us-west-2 migration
+      # (https://github.com/maestra-io/issues-maestra/issues/1354, rake #8).
+      # This workflow pushes with its own docker/build-push-action, so it bypasses
+      # the dual-push already built into the shared composite actions.
+      - name: Mirror image to us-west-2
+        uses: maestra-io/github-actions/mirror-to-secondary-ecr@main
+        with:
+          repository: netbox-zone-labeler
+          tag: ${{ steps.tags.outputs.image_tags }}
+          registry: ${{ env.ECR_REGISTRY }}
+          awsRoleArn: ${{ env.AWS_ROLE_ARN }}
+          awsWebIdentityTokenFile: /tmp/tbot-output/jwt_svid
+
       - name: Package and push Helm chart
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
@@ -102,3 +126,14 @@ jobs:
           sed -i "s/^appVersion:.*/appVersion: \"${VERSION}\"/" charts/netbox-zone-labeler/Chart.yaml
           helm package charts/netbox-zone-labeler
           helm push netbox-zone-labeler-${VERSION}.tgz oci://${{ env.ECR_REGISTRY }}/helm-charts
+
+      # Same mirroring for the Helm chart artifact, which is pushed with its own
+      # `helm push` to the `helm-charts/netbox-zone-labeler` ECR repository.
+      - name: Mirror Helm chart to us-west-2
+        uses: maestra-io/github-actions/mirror-to-secondary-ecr@main
+        with:
+          repository: helm-charts/netbox-zone-labeler
+          tag: ${{ steps.tags.outputs.version }}
+          registry: ${{ env.ECR_REGISTRY }}
+          awsRoleArn: ${{ env.AWS_ROLE_ARN }}
+          awsWebIdentityTokenFile: /tmp/tbot-output/jwt_svid
