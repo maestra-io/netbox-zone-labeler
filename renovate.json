@@ -1,6 +1,24 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
-    "config:recommended"
+    "config:recommended",
+    "helpers:pinGitHubActionDigests",
+    "docker:pinDigests",
+    ":automergeDigest",
+    ":automergePatch"
+  ],
+  "postUpdateOptions": ["gomodTidy"],
+  "packageRules": [
+    {
+      "description": "tbot must not run newer than the Teleport proxy it joins (curl -s https://teleport.maestra.io/webapi/find | jq .server_version). Raise the ceiling after the proxy upgrade.",
+      "matchPackageNames": ["public.ecr.aws/gravitational/tbot-distroless"],
+      "allowedVersions": "<18.11.0"
+    },
+    {
+      "description": "One PR for all Go module minors; the kubernetes monorepo keeps its own group from config:recommended.",
+      "matchManagers": ["gomod"],
+      "matchUpdateTypes": ["minor"],
+      "groupName": "go modules (minor)"
+    }
   ]
 }

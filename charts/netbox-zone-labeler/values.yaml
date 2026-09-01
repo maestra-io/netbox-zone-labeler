@@ -1,37 +1,65 @@
 image:
   repository: 515260921971.dkr.ecr.eu-central-1.amazonaws.com/netbox-zone-labeler
+  # Defaults to .Chart.AppVersion, which the release pipeline sets from the tag.
   tag: ""
   pullPolicy: IfNotPresent
 
+imagePullSecrets:
+  - name: image-pull
+
+# Overrides the resource name prefix (defaults to the release name).
+fullnameOverride: ""
+
 tbot:
+  # Must not be newer than the Teleport proxy it joins (renovate.json caps it).
   image: public.ecr.aws/gravitational/tbot-distroless:18.10.7
   proxyServer: teleport.maestra.io:443
   appName: netbox
+  # application-tunnel listener. Bound to 127.0.0.1: the tunnel authenticates
+  # every connection as the bot, so it must stay reachable only from the pod.
   port: 8080
+  # tbot diagnostics endpoint (/livez, /readyz); kubelet probes it, and the
+  # labeler container is not started until /readyz reports the tunnel healthy.
+  diagPort: 3001
   joinToken: netbox-zone-labeler
+  # 7d max working set on us-omega: 41.8Mi (tbot 18.10, 74 nodes) -> x1.5.
   resources:
     requests:
       cpu: 10m
-      memory: 32Mi
+      memory: 64Mi
     limits:
       memory: 64Mi
 
 netbox:
-  url: "http://localhost:8080"
+  # The tbot tunnel above; must match tbot.port.
+  url: "http://127.0.0.1:8080"
 
 # Comma-separated list of node roles to exclude from labeling.
 # Nodes with label node-role.kubernetes.io/<role> will be skipped.
 # Example: "master,control-plane,system"
 excludeNodeRoles: ""
 
+# Extra environment variables for the labeler container (list of EnvVar).
 env: []
 
+podAnnotations: {}
+
+# 7d max working set on us-omega: 39.5Mi (74 nodes, full-object informer) -> x1.5.
+# memory requests == limits is required by the omega admission policy.
 resources:
   requests:
     cpu: 10m
-    memory: 32Mi
+    memory: 64Mi
   limits:
     memory: 64Mi
+
+metrics:
+  # VictoriaMetrics operator scrape of :8081/metrics. Off by default because
+  # the VMPodScrape CRD is not present on every cluster.
+  vmPodScrape:
+    enabled: false
+    interval: 60s
+    scrapeTimeout: 10s
 
 priorityClassName: ""
 

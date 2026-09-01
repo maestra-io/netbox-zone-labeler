@@ -1,0 +1,18 @@
+{{- if .Values.metrics.vmPodScrape.enabled }}
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMPodScrape
+metadata:
+  name: {{ include "netbox-zone-labeler.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netbox-zone-labeler.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "netbox-zone-labeler.selectorLabels" . | nindent 6 }}
+  podMetricsEndpoints:
+    - port: health
+      path: /metrics
+      interval: {{ .Values.metrics.vmPodScrape.interval }}
+      scrapeTimeout: {{ .Values.metrics.vmPodScrape.scrapeTimeout }}
+{{- end }}

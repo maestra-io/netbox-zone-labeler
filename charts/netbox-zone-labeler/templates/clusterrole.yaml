@@ -1,8 +1,12 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: netbox-zone-labeler
+  name: {{ include "netbox-zone-labeler.fullname" . }}
+  labels:
+    {{- include "netbox-zone-labeler.labels" . | nindent 4 }}
 rules:
+  # list+watch feed the informer, patch applies the label; nothing reads a
+  # single node by name.
   - apiGroups: [""]
     resources: ["nodes"]
-    verbs: ["get", "list", "watch", "patch"]
+    verbs: ["list", "watch", "patch"]

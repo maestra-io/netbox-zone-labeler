@@ -1,32 +1,39 @@
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: netbox-zone-labeler
+  name: {{ include "netbox-zone-labeler.fullname" . }}
   namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netbox-zone-labeler.labels" . | nindent 4 }}
 spec:
   podSelector:
     matchLabels:
-      app.kubernetes.io/name: netbox-zone-labeler
+      {{- include "netbox-zone-labeler.selectorLabels" . | nindent 6 }}
   policyTypes:
     - Ingress
     - Egress
   ingress:
-    # Allow Prometheus scrape on metrics port
+    # Metrics scrape on the labeler's health port. Kubelet probes are not
+    # subject to the policy, so the tbot diag port needs no ingress rule.
     - ports:
         - port: 8081
           protocol: TCP
   egress:
-    # Allow DNS resolution
+    # DNS
     - ports:
         - port: 53
           protocol: UDP
         - port: 53
           protocol: TCP
-    # Allow Kubernetes API server
+    # Kubernetes API server (labeler). The in-cluster client dials
+    # kubernetes.default:443, but the policy is evaluated after the service
+    # DNAT, i.e. against the apiserver's own 6443.
     - ports:
         - port: 6443
           protocol: TCP
-    # Allow Teleport proxy (tbot sidecar: 443 for API, 3024 for auth tunnel)
+    # Teleport proxy (tbot): 443 for the API, 3024 for the reverse tunnel
+    # (teleport.maestra.io runs without TLS routing). NetBox itself is reached
+    # over the loopback tunnel and never leaves the pod.
     - ports:
         - port: 443
           protocol: TCP
