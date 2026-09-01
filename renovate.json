@@ -7,17 +7,45 @@
     ":automergeDigest",
     ":automergePatch"
   ],
-  "postUpdateOptions": ["gomodTidy"],
+  "postUpdateOptions": [
+    "gomodTidy"
+  ],
   "packageRules": [
     {
+      "description": "The chart's own image: tag is empty on purpose (defaults to appVersion, set by the release tag). Never pin or bump it.",
+      "matchManagers": [
+        "helm-values"
+      ],
+      "matchPackageNames": [
+        "515260921971.dkr.ecr.eu-central-1.amazonaws.com/netbox-zone-labeler"
+      ],
+      "enabled": false
+    },
+    {
+      "description": "Our own composite actions are consumed from main by design; a digest pin would turn every commit there into a PR here.",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchPackageNames": [
+        "maestra-io/github-actions"
+      ],
+      "pinDigests": false
+    },
+    {
       "description": "tbot must not run newer than the Teleport proxy it joins (curl -s https://teleport.maestra.io/webapi/find | jq .server_version). Raise the ceiling after the proxy upgrade.",
-      "matchPackageNames": ["public.ecr.aws/gravitational/tbot-distroless"],
+      "matchPackageNames": [
+        "public.ecr.aws/gravitational/tbot-distroless"
+      ],
       "allowedVersions": "<18.11.0"
     },
     {
       "description": "One PR for all Go module minors; the kubernetes monorepo keeps its own group from config:recommended.",
-      "matchManagers": ["gomod"],
-      "matchUpdateTypes": ["minor"],
+      "matchManagers": [
+        "gomod"
+      ],
+      "matchUpdateTypes": [
+        "minor"
+      ],
       "groupName": "go modules (minor)"
     }
   ]
