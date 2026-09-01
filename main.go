@@ -95,17 +95,23 @@ func run() error {
 	runErr := make(chan error, 1)
 	go func() { runErr <- ctrl.Run(ctx) }()
 
+	var result error
 	select {
-	case err := <-serveErr:
-		if err != nil {
+	case result = <-serveErr:
+		if result != nil {
 			stop()
 			<-runErr
-			return err
+			return result
 		}
-		return <-runErr
-	case err := <-runErr:
-		return err
+		result = <-runErr
+	case result = <-runErr:
 	}
+	// A signal during start-up (e.g. while waiting for NetBox) cancels ctx
+	// before the informer has synced; that is a clean shutdown, not a failure.
+	if ctx.Err() != nil {
+		return nil
+	}
+	return result
 }
 
 // kubeConfig prefers the in-cluster config and falls back to KUBECONFIG /
