@@ -16,12 +16,24 @@ env:
   AWS_ROLE_ARN: "arn:aws:iam::515260921971:role/teleport-image-push"
 
 jobs:
-  release:
+  # A tag is not necessarily on main: run the same gates CI runs before
+  # anything is pushed to the registry.
+  verify:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
+      - run: helm lint --strict charts/netbox-zone-labeler
 
-      - uses: azure/setup-helm@v5
+  release:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
 
       - name: Get Teleport version
         id: tp-version
@@ -39,9 +51,10 @@ jobs:
           version: ${{ steps.tp-version.outputs.version }}
           proxy: ${{ env.TELEPORT_FQDN }}
 
+      # helm and the AWS CLI v2 are preinstalled on ubuntu-latest.
       - name: ECR login via Teleport Workload Identity
         run: |
-          cat > /tmp/tbot.yaml << EOF
+          cat > /tmp/tbot.yaml << EOT
           version: v2
           proxy_server: ${{ env.TELEPORT_FQDN }}
           onboarding:
@@ -58,13 +71,16 @@ jobs:
               selector:
                 name: image-push
               audiences: ["sts.amazonaws.com"]
-          EOF
+          EOT
 
           mkdir -p /tmp/tbot-output
-          tbot start -c /tmp/tbot.yaml || true
+          # The SVID file is the real success signal; a non-zero exit is
+          # surfaced as a warning instead of being swallowed.
+          if ! tbot start -c /tmp/tbot.yaml; then
+            echo "::warning::tbot exited non-zero; continuing only if the SVID was written"
+          fi
           test -f /tmp/tbot-output/jwt_svid
 
-          pip install -q awscli
           export AWS_WEB_IDENTITY_TOKEN_FILE=/tmp/tbot-output/jwt_svid
           export AWS_ROLE_ARN="${{ env.AWS_ROLE_ARN }}"
           export AWS_DEFAULT_REGION=${{ env.AWS_REGION }}
@@ -90,10 +106,16 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "image_tags=${VERSION},${VERSION%.*}" >> "$GITHUB_OUTPUT"
 
+      - uses: docker/setup-buildx-action@v4
+
       - uses: docker/metadata-action@v6
         id: meta
         with:
           images: ${{ env.ECR_REGISTRY }}/netbox-zone-labeler
+          # No floating `latest`: the chart pins appVersion, and `latest` was
+          # the one tag the us-west-2 mirror step below never received.
+          flavor: |
+            latest=false
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -104,6 +126,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       # Mirror the pushed tags to us-west-2 — phase 3 dual-push of the ECR
       # eu-central-1 -> us-west-2 migration
@@ -121,11 +145,9 @@ jobs:
 
       - name: Package and push Helm chart
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          sed -i "s/^version:.*/version: ${VERSION}/" charts/netbox-zone-labeler/Chart.yaml
-          sed -i "s/^appVersion:.*/appVersion: \"${VERSION}\"/" charts/netbox-zone-labeler/Chart.yaml
-          helm package charts/netbox-zone-labeler
-          helm push netbox-zone-labeler-${VERSION}.tgz oci://${{ env.ECR_REGISTRY }}/helm-charts
+          VERSION="${{ steps.tags.outputs.version }}"
+          helm package charts/netbox-zone-labeler --version "${VERSION}" --app-version "${VERSION}"
+          helm push "netbox-zone-labeler-${VERSION}.tgz" oci://${{ env.ECR_REGISTRY }}/helm-charts
 
       # Same mirroring for the Helm chart artifact, which is pushed with its own
       # `helm push` to the `helm-charts/netbox-zone-labeler` ECR repository.

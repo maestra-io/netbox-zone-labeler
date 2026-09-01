@@ -1,8 +1,10 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: tbot-config
+  name: {{ include "netbox-zone-labeler.fullname" . }}-tbot
   namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netbox-zone-labeler.labels" . | nindent 4 }}
 data:
   tbot.yaml: |
     version: v2
@@ -12,7 +14,12 @@ data:
       token: {{ .Values.tbot.joinToken }}
     storage:
       type: memory
+    # /livez and /readyz for kubelet; bound to the pod IP because kubelet
+    # probes over the network. NetworkPolicy keeps it off the cluster.
+    diag_addr: 0.0.0.0:{{ .Values.tbot.diagPort }}
     services:
       - type: application-tunnel
+        name: netbox
         app_name: {{ .Values.tbot.appName }}
-        listen: tcp://0.0.0.0:{{ .Values.tbot.port }}
+        # Loopback only: the tunnel authenticates every client as the bot.
+        listen: tcp://127.0.0.1:{{ .Values.tbot.port }}

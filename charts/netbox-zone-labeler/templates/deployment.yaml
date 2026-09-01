@@ -1,24 +1,36 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: netbox-zone-labeler
+  name: {{ include "netbox-zone-labeler.fullname" . }}
   namespace: {{ .Release.Namespace }}
   labels:
-    app.kubernetes.io/name: netbox-zone-labeler
+    {{- include "netbox-zone-labeler.labels" . | nindent 4 }}
 spec:
+  # Single instance by design: there is no leader election, and two labelers
+  # would race each other on the same node patches. Recreate keeps the old pod
+  # from overlapping the new one for the same reason.
   replicas: 1
   strategy:
     type: Recreate
   selector:
     matchLabels:
-      app.kubernetes.io/name: netbox-zone-labeler
+      {{- include "netbox-zone-labeler.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: netbox-zone-labeler
+        {{- include "netbox-zone-labeler.labels" . | nindent 8 }}
+      annotations:
+        # Roll the pod when the tbot config changes; a ConfigMap edit alone
+        # restarts nothing.
+        checksum/tbot-config: {{ include (print $.Template.BasePath "/tbot-configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
     spec:
+      {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
-        - name: image-pull
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       serviceAccountName: {{ .Values.serviceAccount.name }}
       {{- with .Values.priorityClassName }}
       priorityClassName: {{ . | quote }}
@@ -31,34 +43,38 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      containers:
+      initContainers:
+        # Native sidecar: started before the labeler, must pass its startup
+        # probe before the labeler starts, and is stopped after it. The
+        # labeler therefore never sees a tunnel that is not up yet, and an
+        # in-flight NetBox request is not cut by the tunnel going away first.
         - name: tbot
+          restartPolicy: Always
           image: {{ .Values.tbot.image }}
           args:
             - start
             - -c
             - /config/tbot.yaml
           ports:
-            - containerPort: {{ .Values.tbot.port }}
-              name: app-tunnel
+            - containerPort: {{ .Values.tbot.diagPort }}
+              name: tbot-diag
           securityContext:
-            runAsUser: 65532
-            runAsGroup: 65532
-            readOnlyRootFilesystem: true
-            allowPrivilegeEscalation: false
-            seccompProfile:
-              type: RuntimeDefault
-            capabilities:
-              drop: ["ALL"]
+            {{- include "netbox-zone-labeler.containerSecurityContext" . | nindent 12 }}
+          startupProbe:
+            httpGet:
+              path: /readyz
+              port: tbot-diag
+            periodSeconds: 2
+            failureThreshold: 60
           livenessProbe:
-            tcpSocket:
-              port: app-tunnel
-            initialDelaySeconds: 15
+            httpGet:
+              path: /livez
+              port: tbot-diag
             periodSeconds: 30
           readinessProbe:
-            tcpSocket:
-              port: app-tunnel
-            initialDelaySeconds: 5
+            httpGet:
+              path: /readyz
+              port: tbot-diag
             periodSeconds: 10
           volumeMounts:
             - name: tbot-config
@@ -72,6 +88,7 @@ spec:
               value: /var/run/secrets/teleport-join/token
           resources:
             {{- toYaml .Values.tbot.resources | nindent 12 }}
+      containers:
         - name: labeler
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
@@ -79,25 +96,22 @@ spec:
             - containerPort: 8081
               name: health
           securityContext:
-            runAsUser: 65534
-            runAsGroup: 65534
-            readOnlyRootFilesystem: true
-            allowPrivilegeEscalation: false
-            seccompProfile:
-              type: RuntimeDefault
-            capabilities:
-              drop: ["ALL"]
+            {{- include "netbox-zone-labeler.containerSecurityContext" . | nindent 12 }}
+          startupProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            periodSeconds: 2
+            failureThreshold: 60
           livenessProbe:
             httpGet:
               path: /healthz
               port: health
-            initialDelaySeconds: 10
             periodSeconds: 30
           readinessProbe:
             httpGet:
               path: /readyz
               port: health
-            initialDelaySeconds: 5
             periodSeconds: 10
           env:
             - name: NETBOX_URL
@@ -119,7 +133,7 @@ spec:
       volumes:
         - name: tbot-config
           configMap:
-            name: tbot-config
+            name: {{ include "netbox-zone-labeler.fullname" . }}-tbot
         - name: teleport-join-token
           projected:
             sources:

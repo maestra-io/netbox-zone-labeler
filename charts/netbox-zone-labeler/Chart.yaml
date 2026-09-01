@@ -1,6 +1,19 @@
 apiVersion: v2
 name: netbox-zone-labeler
-description: Labels Kubernetes nodes with topology zone based on NetBox rack data
-version: 0.3.0
-appVersion: "0.3.0"
+description: Labels Kubernetes nodes with topology.kubernetes.io/zone from the NetBox rack of the device (or of the VM's host)
 type: application
+# version and appVersion are placeholders: release.yaml overwrites both with
+# the git tag (`helm package --version --app-version`).
+version: 0.0.0
+appVersion: "0.0.0"
+# Native sidecars (initContainers[].restartPolicy: Always) are GA since 1.29.
+kubeVersion: ">=1.29.0-0"
+keywords:
+  - netbox
+  - topology
+  - nodes
+sources:
+  - https://github.com/maestra-io/netbox-zone-labeler
+maintainers:
+  - name: maestra-io
+    url: https://github.com/maestra-io
