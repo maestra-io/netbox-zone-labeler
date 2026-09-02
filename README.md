@@ -101,8 +101,11 @@ containers run as `65532`, with `requests.memory == limits.memory`.
 ## Releasing
 
 Push a tag `vX.Y.Z`. The `Release` workflow runs the tests, builds the image,
-pushes `X.Y.Z` and `X.Y` to ECR, packages the chart with the same version and
-mirrors both to us-west-2. Then bump `spec.chart.spec.version` in the consuming
+pushes `X.Y.Z` and `X.Y` to ECR in `us-west-2`, and packages the chart with the
+same version and pushes it there too. Since phase 6 of the ECR migration
+(`maestra-io/issues-maestra#1354`) `us-west-2` is the only registry written to —
+`eu-central-1` is frozen — so the two mirror steps are switched off rather than
+copying anything. Then bump `spec.chart.spec.version` in the consuming
 `HelmRelease` (`maestra-io/fluxcd/base/netbox-zone-labeler`).
 
 ## Local development
