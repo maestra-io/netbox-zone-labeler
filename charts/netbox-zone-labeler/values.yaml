@@ -1,5 +1,5 @@
 image:
-  repository: 515260921971.dkr.ecr.eu-central-1.amazonaws.com/netbox-zone-labeler
+  repository: 515260921971.dkr.ecr.us-west-2.amazonaws.com/netbox-zone-labeler
   # Defaults to .Chart.AppVersion, which the release pipeline sets from the tag.
   tag: ""
   pullPolicy: IfNotPresent
