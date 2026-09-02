@@ -9,8 +9,8 @@ permissions:
   id-token: write
 
 env:
-  AWS_REGION: eu-central-1
-  ECR_REGISTRY: 515260921971.dkr.ecr.eu-central-1.amazonaws.com
+  AWS_REGION: us-west-2
+  ECR_REGISTRY: 515260921971.dkr.ecr.us-west-2.amazonaws.com
   TELEPORT_FQDN: teleport.maestra.io:443
   TELEPORT_TOKEN: image-push-github-actions-netbox-zone-labeler
   AWS_ROLE_ARN: "arn:aws:iam::515260921971:role/teleport-image-push"
@@ -129,14 +129,19 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # Mirror the pushed tags to us-west-2 — phase 3 dual-push of the ECR
-      # eu-central-1 -> us-west-2 migration
+      # Was the phase 3 dual-push mirror of the ECR eu-central-1 -> us-west-2
+      # migration; phase 6 froze eu-central-1 and this workflow now pushes
+      # straight to us-west-2, so the mirror has nothing to copy and is off
       # (https://github.com/maestra-io/issues-maestra/issues/1354, rake #8).
       # This workflow pushes with its own docker/build-push-action, so it bypasses
       # the dual-push already built into the shared composite actions.
-      - name: Mirror image to us-west-2
+      - name: Mirror image to the secondary ECR region (off since phase 6)
         uses: maestra-io/github-actions/mirror-to-secondary-ecr@main
         with:
+          # Phase 6 (issues-maestra#1354): eu-central-1 is frozen, us-west-2 is the
+          # only push target, so there is nothing left to mirror. Empty skips the
+          # whole step. Kept as a call so restoring a mirror is one value.
+          secondaryRegion: ''
           repository: netbox-zone-labeler
           tag: ${{ steps.tags.outputs.image_tags }}
           registry: ${{ env.ECR_REGISTRY }}
@@ -151,9 +156,13 @@ jobs:
 
       # Same mirroring for the Helm chart artifact, which is pushed with its own
       # `helm push` to the `helm-charts/netbox-zone-labeler` ECR repository.
-      - name: Mirror Helm chart to us-west-2
+      - name: Mirror Helm chart to the secondary ECR region (off since phase 6)
         uses: maestra-io/github-actions/mirror-to-secondary-ecr@main
         with:
+          # Phase 6 (issues-maestra#1354): eu-central-1 is frozen, us-west-2 is the
+          # only push target, so there is nothing left to mirror. Empty skips the
+          # whole step. Kept as a call so restoring a mirror is one value.
+          secondaryRegion: ''
           repository: helm-charts/netbox-zone-labeler
           tag: ${{ steps.tags.outputs.version }}
           registry: ${{ env.ECR_REGISTRY }}
