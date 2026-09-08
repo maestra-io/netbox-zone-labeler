@@ -17,7 +17,7 @@
         "helm-values"
       ],
       "matchPackageNames": [
-        "515260921971.dkr.ecr.eu-central-1.amazonaws.com/netbox-zone-labeler"
+        "515260921971.dkr.ecr.us-west-2.amazonaws.com/netbox-zone-labeler"
       ],
       "enabled": false
     },
