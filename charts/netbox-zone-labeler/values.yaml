@@ -1,7 +1,7 @@
 image:
   repository: 515260921971.dkr.ecr.us-west-2.amazonaws.com/netbox-zone-labeler
   # Defaults to .Chart.AppVersion, which the release pipeline sets from the tag.
-  tag: ""
+  tag: "@sha256:4425a140b0f87acf874eba2feccd0502a62aa4345a6c89677adc4f71ae1e1f76"
   pullPolicy: IfNotPresent
 
 imagePullSecrets:
