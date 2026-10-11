@@ -36,7 +36,7 @@
       "matchPackageNames": [
         "public.ecr.aws/gravitational/tbot-distroless"
       ],
-      "allowedVersions": "<18.12.0"
+      "allowedVersions": "<=18.11.3"
     },
     {
       "description": "One PR for all Go module minors; the kubernetes monorepo keeps its own group from config:recommended.",
