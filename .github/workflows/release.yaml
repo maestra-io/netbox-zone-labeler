@@ -19,8 +19,9 @@ jobs:
   # A tag is not necessarily on main: run the same gates CI runs before
   # anything is pushed to the registry.
   verify:
-    runs-on: ubuntu-latest
+    runs-on: runs-on=${{ github.run_id }}/pool=small
     steps:
+      - uses: runs-on/action@17b59092eb37ebfdbb034460892887c09100eaa3 # v2.5.0
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
@@ -31,8 +32,9 @@ jobs:
 
   release:
     needs: verify
-    runs-on: ubuntu-latest
+    runs-on: runs-on=${{ github.run_id }}/pool=build
     steps:
+      - uses: runs-on/action@17b59092eb37ebfdbb034460892887c09100eaa3 # v2.5.0
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Get Teleport version
