@@ -125,6 +125,9 @@ func (c *Controller) Run(ctx context.Context) error {
 
 	go c.informer.Run(ctx.Done())
 	if !cache.WaitForCacheSync(ctx.Done(), c.informer.HasSynced) {
+		if ctx.Err() != nil {
+			return nil // cancelled before the first sync: a clean stop
+		}
 		return errors.New("labeler: node informer did not sync")
 	}
 	c.synced.Store(true)

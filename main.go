@@ -100,7 +100,9 @@ func run() error {
 	case result = <-serveErr:
 		if result != nil {
 			stop()
-			<-runErr
+			if err := <-runErr; err != nil {
+				log.Error("controller stopped with error", "error", err)
+			}
 			return result
 		}
 		result = <-runErr
