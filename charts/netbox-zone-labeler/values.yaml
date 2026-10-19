@@ -12,7 +12,7 @@ fullnameOverride: ""
 
 tbot:
   # Must not be newer than the Teleport proxy it joins (renovate.json caps it).
-  image: public.ecr.aws/gravitational/tbot-distroless:18.11.3@sha256:ed5441298a38c0b49fdf19a5131b8d01a7140d1df438e5fbc0ab5a72252b8a3c
+  image: public.ecr.aws/gravitational/tbot-distroless:18.11.4@sha256:50537587e0aa3f8015a8886c39ef99e105fad9d7828ac5e2f9bca6da6bc77dbd
   proxyServer: teleport.maestra.io:443
   appName: netbox
   # application-tunnel listener. Bound to 127.0.0.1: the tunnel authenticates
