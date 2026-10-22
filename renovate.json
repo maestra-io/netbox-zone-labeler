@@ -2,10 +2,10 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "config:recommended",
-    "helpers:pinGitHubActionDigests",
     "docker:pinDigests",
     ":automergeDigest",
-    ":automergePatch"
+    ":automergePatch",
+    "github>maestra-io/renovate-config:externalImages"
   ],
   "postUpdateOptions": [
     "gomodTidy"
@@ -47,6 +47,19 @@
         "minor"
       ],
       "groupName": "go modules (minor)"
+    },
+    {
+      "description": "externalImages invariant re-asserted (issues-maestra#1649): maestra-io actions are pinned by SHA too (org sha_pinning_required); reusable workflows stay on @main.",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchDepTypes": [
+        "action"
+      ],
+      "matchPackageNames": [
+        "maestra-io/**"
+      ],
+      "pinDigests": true
     }
   ]
 }
